@@ -29,6 +29,7 @@ jobs:
       - run: isort --check-only --line-length 79 --profile black .
       - name: Security Check - Bandit
         run: |
+          # Security check using Bandit
           touch security_report.txt
           bandit -r . -o security_report.txt -f 'txt'
           if [ $? -eq 0 ]; then
@@ -36,14 +37,10 @@ jobs:
           else
             echo "Security check failed."
             cat security_report.txt
-            # if $INPUT_IGNORE_FAILURE; then
-            #   exit 0
-            # else
-            #   exit 1
-            # fi
           fi
       - name: Security check report artifacts
         uses: actions/upload-artifact@v4
+        if: success() || failure()
         with:
           name: Security report
           path: security_report.txt
