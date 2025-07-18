@@ -31,13 +31,17 @@ jobs:
         run: |
           # Security check using Bandit
           touch security_report.txt
+          set +e
           bandit -r . -o security_report.txt -f 'txt'
-          if [ $? -eq 0 ]; then
+          EXIT_CODE=$?
+          set -e
+          if [ $EXIT_CODE -eq 0 ]; then
             echo "Security check passed."
           else
             echo "Security check failed."
             cat security_report.txt
           fi
+          exit $EXIT_CODE
       - name: Security check report artifacts
         uses: actions/upload-artifact@v4
         if: success() || failure()
