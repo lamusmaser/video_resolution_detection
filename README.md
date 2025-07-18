@@ -3,19 +3,33 @@
 ## Overview
 `video_resolution_detector` is a script designed to scan directories for video files and identify those that match specific resolution criteria. It recursively searches through MP4 files and generates detailed reports of videos that meet the specified resolution requirements. This tool is particularly useful for managing video libraries, identifying content for transcoding, or organizing media collections by resolution.
 
+## What's New
+- **Parallel Processing:** The script now uses multiple worker processes for faster scanning of large video libraries.
+- **Robust Metadata Extraction:** Uses ffmpeg-python for reliable video metadata extraction and improved error handling.
+- **Detailed Output Logs:** Generates both human-readable text and machine-readable JSON logs, including scan metadata, matching files, and error details.
+- **Flexible Configuration:** All major options (resolution, comparison, directories, workers) can be set via environment variables or command-line flags.
+- **Enhanced Resolution Matching:** Supports both width×height and height-only formats, with ±10px tolerance for height-only matches.
+- **Docker & Standalone Support:** Can be run inside Docker or directly as a Python script.
+
 ## Features
 - Recursively scan directories for MP4 video files
 - Flexible resolution detection (height-only or width×height formats)
 - Multiple comparison operators (equal, less than or equal, greater than or equal)
+- **Parallel processing for faster scans**
 - Detailed logging with both text and JSON output formats
 - Error handling for corrupted or unreadable video files
 - Docker-ready with environment variable support
 
 ## Usage
-To use the script, run the following command inside a Docker container:
+To use the script, run the following command inside a Docker container or directly as a Python script:
 
 ```sh
 docker run --rm -v <source_directory>:/src -v <log_directory>:/log lamusmaser/video_resolution_detector
+```
+
+Or run locally:
+```sh
+python video_detector.py --resolution 720p --comparison lte --src-dir /path/to/videos --log-dir /path/to/logs
 ```
 
 Replace `<source_directory>` with the path containing your video files and `<log_directory>` with where you want the scan results saved.
@@ -64,11 +78,13 @@ The script generates timestamped output files in the log directory:
 - Human-readable summary of scan results
 - List of matching videos with dimensions
 - Error log for problematic files
+- **Includes scan metadata: criteria, processed count, error count, etc.**
 
 ### JSON Log (`video_scan_[criteria]_[timestamp].json`)
 - Detailed metadata for all matching videos
 - Complete error information
 - Machine-readable format for further processing
+- **Includes scan timestamp, criteria, and summary statistics**
 
 ## Command Line Usage
 For direct script execution (outside Docker):
@@ -140,6 +156,7 @@ services:
 The script handles various error conditions gracefully:
 - Corrupted or unreadable video files are skipped and logged
 - Missing metadata is reported without stopping the scan
+- **Worker process errors are captured and reported**
 - FFmpeg timeout protection for problematic files
 - Detailed error reporting in both text and JSON formats
 
