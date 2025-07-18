@@ -11,10 +11,11 @@ import json
 import logging
 import os
 import re
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import ffmpeg
 
 # Configure logging
 logging.basicConfig(
@@ -89,35 +90,26 @@ class VideoAnalyzer:
         Returns dict with width, height, duration, and other metadata.
         """
         try:
-            cmd = [
-                "ffprobe",
-                "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_streams",
-                "-select_streams",
-                "v:0",  # First video stream only
-                str(file_path),
-            ]
+            probe = ffmpeg.probe(str(file_path), select_streams="v:0")
 
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30
-            )
-
-            if result.returncode != 0:
-                logger.warning(
-                    f"ffprobe failed for {file_path}: {result.stderr}"
-                )
-                return None
-
-            data = json.loads(result.stdout)
-
-            if not data.get("streams"):
+            if not probe.get("streams"):
                 logger.warning(f"No video streams found in {file_path}")
                 return None
 
-            stream = data["streams"][0]
+            stream = probe["streams"][0]
+
+            # Extract frame rate as a decimal value
+            fps = None
+            if "r_frame_rate" in stream:
+                fps_str = stream["r_frame_rate"]
+                if "/" in fps_str:
+                    try:
+                        numerator, denominator = map(int, fps_str.split("/"))
+                        fps = numerator / denominator
+                    except (ValueError, ZeroDivisionError):
+                        fps = fps_str  # Keep original if parsing fails
+                else:
+                    fps = fps_str  # Keep original if no division
 
             return {
                 "width": stream.get("width"),
@@ -125,14 +117,10 @@ class VideoAnalyzer:
                 "duration": stream.get("duration"),
                 "codec": stream.get("codec_name"),
                 "bitrate": stream.get("bit_rate"),
-                "fps": stream.get("r_frame_rate"),
+                "fps": fps,
             }
-
-        except subprocess.TimeoutExpired:
-            logger.error(f"Timeout processing {file_path}")
-            return None
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON from ffprobe for {file_path}")
+        except ffmpeg.Error as e:
+            logger.error(f"ffmpeg error processing {file_path}: {e}")
             return None
         except Exception as e:
             logger.error(f"Error processing {file_path}: {str(e)}")
@@ -316,6 +304,27 @@ class VideoAnalyzer:
 
         logger.info(f"Results written to {text_log_path} and {json_log_path}")
 
+    def _check_ffmpeg_available(self) -> bool:
+        """Check if ffmpeg/ffprobe is available."""
+        try:
+            # Try to get ffmpeg version using ffmpeg-python
+            ffmpeg.probe("nonexistent_file.mp4")
+            return True
+        except ffmpeg.Error:
+            """
+            This is expected for a non-existent file,
+            but it means ffprobe is working
+            """
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception:
+            """
+            Any other exception likely means ffprobe
+            is available but there's another issue
+            """
+            return True
+
     def run(self) -> None:
         """Main execution method."""
         comparison_symbol = {"eq": "==", "lte": "<=", "gte": ">="}.get(
@@ -328,13 +337,9 @@ class VideoAnalyzer:
             f"{comparison_symbol} {self.resolution}"
         )
 
-        # Check if ffprobe is available
-        try:
-            subprocess.run(
-                ["ffprobe", "-version"], capture_output=True, check=True
-            )
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            logger.error("ffprobe not found. Please install ffmpeg.")
+        # Check if ffmpeg is available
+        if not self._check_ffmpeg_available():
+            logger.error("ffmpeg/ffprobe not found. Please install ffmpeg.")
             return
 
         # Find all MP4 files
