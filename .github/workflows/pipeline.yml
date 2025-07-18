@@ -8,12 +8,13 @@ on:
     pull_request:
         branches: [ main ]
 
+permissions:
+    contents: read
+    id-token: write
+    packages: write
+
 jobs:
     call_primary_builder:
-        permissions:
-            contents: read
-            id-token: write
-            packages: write
         uses: lamusmaser/principal_container_builder_pipeline/.github/workflows/primary_pipeline.yml@main
         with:
             IMAGE_NAME: lamusmaser/video_resolution_detection
