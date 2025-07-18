@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Video Resolution Detection Script
-Recursively scans /src directory for .mp4 files and
-    identifies videos based on resolution criteria.
+Recursively scans /src directory for .mp4 files
+and identifies videos based on resolution criteria.
 Logs results to /log directory.
 """
 
@@ -11,9 +11,12 @@ import json
 import logging
 import os
 import re
+import threading
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
+from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import ffmpeg
 
@@ -31,6 +34,7 @@ class VideoAnalyzer:
         log_dir: str = "/log",
         resolution: str = "360p",
         comparison: str = "eq",
+        max_workers: Optional[int] = None,
     ):
         self.src_dir = Path(src_dir)
         self.log_dir = Path(log_dir)
@@ -43,7 +47,13 @@ class VideoAnalyzer:
             resolution
         )
 
-        # Results storage
+        # Parallelization settings
+        self.max_workers = max_workers or min(
+            cpu_count(), 8
+        )  # Cap at 8 for I/O considerations
+
+        # Results storage (thread-safe)
+        self._results_lock = threading.Lock()
         self.results = {
             "scan_timestamp": datetime.now().isoformat(),
             "resolution_criteria": resolution,
@@ -86,11 +96,17 @@ class VideoAnalyzer:
 
     def get_video_info(self, file_path: Path) -> Optional[Dict]:
         """
-        Extract video metadata using ffprobe.
-        Returns dict with width, height, duration, and other metadata.
+        Extract video metadata using ffmpeg-python.
+        Returns dict with width and height only (what we actually need).
         """
         try:
-            probe = ffmpeg.probe(str(file_path), select_streams="v:0")
+            # Use ffprobe via ffmpeg-python to get only essential metadata
+            # Only get width and height since that's all we use for comparisons
+            probe = ffmpeg.probe(
+                str(file_path),
+                select_streams="v:0",
+                show_entries="stream=width,height",
+            )
 
             if not probe.get("streams"):
                 logger.warning(f"No video streams found in {file_path}")
@@ -98,27 +114,11 @@ class VideoAnalyzer:
 
             stream = probe["streams"][0]
 
-            # Extract frame rate as a decimal value
-            fps = None
-            if "r_frame_rate" in stream:
-                fps_str = stream["r_frame_rate"]
-                if "/" in fps_str:
-                    try:
-                        numerator, denominator = map(int, fps_str.split("/"))
-                        fps = numerator / denominator
-                    except (ValueError, ZeroDivisionError):
-                        fps = fps_str  # Keep original if parsing fails
-                else:
-                    fps = fps_str  # Keep original if no division
-
             return {
                 "width": stream.get("width"),
                 "height": stream.get("height"),
-                "duration": stream.get("duration"),
-                "codec": stream.get("codec_name"),
-                "bitrate": stream.get("bit_rate"),
-                "fps": fps,
             }
+
         except ffmpeg.Error as e:
             logger.error(f"ffmpeg error processing {file_path}: {e}")
             return None
@@ -186,8 +186,19 @@ class VideoAnalyzer:
         except ValueError:
             return str(file_path)
 
-    def process_file(self, file_path: Path) -> None:
-        """Process a single video file."""
+    def _update_results(self, result: Dict) -> None:
+        """Thread-safe method to update results."""
+        with self._results_lock:
+            if result["type"] == "match":
+                self.results["matching_files"].append(result["data"])
+            elif result["type"] == "error":
+                self.results["errors"].append(result["data"])
+                self.results["error_files"] += 1
+
+            self.results["processed_files"] += 1
+
+    def process_file(self, file_path: Path) -> Dict:
+        """Process a single video file and return result."""
         relative_path = self.get_relative_path(file_path)
 
         try:
@@ -198,47 +209,45 @@ class VideoAnalyzer:
             video_info = self.get_video_info(file_path)
 
             if video_info is None:
-                self.results["errors"].append(
-                    {
+                return {
+                    "type": "error",
+                    "data": {
                         "file": relative_path,
                         "error": "Failed to extract video metadata",
-                    }
-                )
-                self.results["error_files"] += 1
-                return
+                    },
+                }
 
             # Check if it matches criteria
             if self.matches_criteria(video_info):
-                self.results["matching_files"].append(
-                    {
-                        "file": relative_path,
-                        "width": video_info["width"],
-                        "height": video_info["height"],
-                        "duration": video_info.get("duration"),
-                        "codec": video_info.get("codec"),
-                        "size_bytes": file_size,
-                    }
-                )
-
                 comparison_symbol = {"eq": "==", "lte": "<=", "gte": ">="}.get(
                     self.comparison, "=="
                 )
 
                 logger.info(
                     f"Found matching video: {relative_path} "
-                    f"({video_info['width']}x{video_info['height']}"
-                    f" {comparison_symbol} {self.resolution})"
+                    f"({video_info['width']}x{video_info['height']} "
+                    f"{comparison_symbol} {self.resolution})"
                 )
 
-            self.results["processed_files"] += 1
+                return {
+                    "type": "match",
+                    "data": {
+                        "file": relative_path,
+                        "width": video_info["width"],
+                        "height": video_info["height"],
+                        "size_bytes": file_size,
+                    },
+                }
+
+            return {"type": "processed"}
 
         except Exception as e:
             error_msg = f"Error processing file: {str(e)}"
-            self.results["errors"].append(
-                {"file": relative_path, "error": error_msg}
-            )
-            self.results["error_files"] += 1
             logger.error(f"Error processing {relative_path}: {error_msg}")
+            return {
+                "type": "error",
+                "data": {"file": relative_path, "error": error_msg},
+            }
 
     def _get_filename_suffix(self) -> str:
         """Generate filename suffix based on criteria."""
@@ -274,7 +283,7 @@ class VideoAnalyzer:
             )
             f.write(f"Errors: {self.results['error_files']}\n")
             f.write(
-                f"Matching Videos Found:"
+                f"Matching Videos Found: "
                 f"{len(self.results['matching_files'])}\n"
             )
             f.write(f"{'-' * 50}\n\n")
@@ -285,7 +294,7 @@ class VideoAnalyzer:
                 )
                 for video in self.results["matching_files"]:
                     f.write(
-                        f"\t{video['file']} "
+                        f"  {video['file']} "
                         f"({video['width']}x{video['height']})\n"
                     )
                 f.write("\n")
@@ -311,18 +320,14 @@ class VideoAnalyzer:
             ffmpeg.probe("nonexistent_file.mp4")
             return True
         except ffmpeg.Error:
-            """
-            This is expected for a non-existent file,
-            but it means ffprobe is working
-            """
+            """This is expected for a non-existent file,
+            but it means ffprobe is working"""
             return True
         except FileNotFoundError:
             return False
         except Exception:
-            """
-            Any other exception likely means ffprobe
-            is available but there's another issue
-            """
+            """Any other exception likely means ffprobe
+            is available but there's another issue"""
             return True
 
     def run(self) -> None:
@@ -352,14 +357,44 @@ class VideoAnalyzer:
             return
 
         logger.info(f"Found {len(mp4_files)} .mp4 files to process")
+        logger.info(f"Using {self.max_workers} worker processes")
 
-        # Process each file
-        for i, file_path in enumerate(mp4_files, 1):
-            logger.info(
-                f"Processing {i}/{len(mp4_files)}: "
-                f"{self.get_relative_path(file_path)}"
-            )
-            self.process_file(file_path)
+        # Process files in parallel
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all files for processing
+            future_to_file = {
+                executor.submit(
+                    process_file_worker,
+                    file_path,
+                    self.src_dir,
+                    self.comparison,
+                    self.target_width,
+                    self.target_height,
+                ): file_path
+                for file_path in mp4_files
+            }
+
+            # Process completed futures
+            for i, future in enumerate(as_completed(future_to_file), 1):
+                file_path = future_to_file[future]
+                relative_path = self.get_relative_path(file_path)
+
+                logger.info(
+                    f"Processing {i}/{len(mp4_files)}: {relative_path}"
+                )
+
+                try:
+                    result = future.result()
+                    self._update_results(result)
+                except Exception as e:
+                    error_result = {
+                        "type": "error",
+                        "data": {
+                            "file": relative_path,
+                            "error": f"Worker process error: {str(e)}",
+                        },
+                    }
+                    self._update_results(error_result)
 
         # Write results
         self.write_results()
@@ -372,6 +407,153 @@ class VideoAnalyzer:
         logger.info(
             f"Matching videos found: {len(self.results['matching_files'])}"
         )
+
+
+class VideoInfo(NamedTuple):
+    """Container for video metadata."""
+
+    width: int
+    height: int
+
+
+class ProcessingResult(NamedTuple):
+    """Container for processing results."""
+
+    type: str
+    data: Dict
+
+
+class VideoProcessor:
+    """Handles video file processing and criteria matching."""
+
+    def __init__(
+        self,
+        comparison: str,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ):
+        self.comparison = comparison
+        self.target_width = target_width
+        self.target_height = target_height
+        self._height_tolerance = 10
+
+    def get_video_info(self, file_path: Path) -> Optional[VideoInfo]:
+        """Extract video dimensions from file."""
+        try:
+            probe = ffmpeg.probe(
+                str(file_path),
+                select_streams="v:0",
+                show_entries="stream=width,height",
+            )
+
+            if not probe.get("streams"):
+                return None
+
+            stream = probe["streams"][0]
+            width = stream.get("width")
+            height = stream.get("height")
+
+            if width is None or height is None:
+                return None
+
+            return VideoInfo(width=width, height=height)
+
+        except Exception:
+            return None
+
+    def matches_criteria(self, video_info: VideoInfo) -> bool:
+        """Check if video matches the specified criteria."""
+        if self.target_width is not None and self.target_height is not None:
+            return self._check_both_dimensions(video_info)
+        elif self.target_height is not None:
+            return self._check_height_only(video_info)
+        return False
+
+    def _check_both_dimensions(self, video_info: VideoInfo) -> bool:
+        """Check criteria when both width and height are specified."""
+        comparisons = {
+            "eq": lambda w, h: w == self.target_width
+            and h == self.target_height,
+            "lte": lambda w, h: w <= self.target_width
+            and h <= self.target_height,
+            "gte": lambda w, h: w >= self.target_width
+            and h >= self.target_height,
+        }
+
+        check_func = comparisons.get(self.comparison)
+        if check_func:
+            return check_func(video_info.width, video_info.height)
+        return False
+
+    def _check_height_only(self, video_info: VideoInfo) -> bool:
+        """Check criteria when only height is specified."""
+        comparisons = {
+            "eq": lambda h: abs(h - self.target_height)
+            <= self._height_tolerance,
+            "lte": lambda h: h <= self.target_height,
+            "gte": lambda h: h >= self.target_height,
+        }
+
+        check_func = comparisons.get(self.comparison)
+        if check_func:
+            return check_func(video_info.height)
+        return False
+
+
+def get_relative_path(file_path: Path, src_dir: Path) -> str:
+    """Get relative path from source directory."""
+    try:
+        return str(file_path.relative_to(src_dir))
+    except ValueError:
+        return str(file_path)
+
+
+def process_file_worker(
+    file_path: Path,
+    src_dir: Path,
+    comparison: str,
+    target_width: Optional[int] = None,
+    target_height: Optional[int] = None,
+) -> Dict:
+    """Worker function for parallel video file processing."""
+
+    processor = VideoProcessor(comparison, target_width, target_height)
+    relative_path = get_relative_path(file_path, src_dir)
+
+    try:
+        file_size = file_path.stat().st_size
+        video_info = processor.get_video_info(file_path)
+
+        if video_info is None:
+            return {
+                "type": "error",
+                "data": {
+                    "file": relative_path,
+                    "error": "Failed to extract video metadata",
+                },
+            }
+
+        if processor.matches_criteria(video_info):
+            return {
+                "type": "match",
+                "data": {
+                    "file": relative_path,
+                    "width": video_info.width,
+                    "height": video_info.height,
+                    "size_bytes": file_size,
+                },
+            }
+
+        return {"type": "processed"}
+
+    except Exception as e:
+        return {
+            "type": "error",
+            "data": {
+                "file": relative_path,
+                "error": f"Error processing file: {str(e)}",
+            },
+        }
 
 
 def main():
@@ -409,6 +591,14 @@ def main():
         help="Log output directory (default: /log). Can be set via LOG_DIR env var.",  # noqa: E501
     )
 
+    parser.add_argument(
+        "--max-workers",
+        "-w",
+        type=int,
+        default=os.environ.get("MAX_WORKERS"),
+        help="Maximum number of worker processes (default: auto-detect). Can be set via MAX_WORKERS env var.",  # noqa: E501
+    )
+
     args = parser.parse_args()
 
     # Validate environment variable for comparison if set
@@ -424,6 +614,7 @@ def main():
             log_dir=args.log_dir,
             resolution=args.resolution,
             comparison=args.comparison,
+            max_workers=args.max_workers,
         )
         analyzer.run()
     except ValueError as e:
