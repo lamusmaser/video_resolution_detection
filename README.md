@@ -15,7 +15,7 @@
 - Recursively scan directories for MP4 video files
 - Flexible resolution detection (height-only or width×height formats)
 - Multiple comparison operators (equal, less than or equal, greater than or equal)
-- **Parallel processing for faster scans**
+- **Parallel processing for faster scans (auto-detects CPU cores, configurable via MAX_WORKERS)**
 - Detailed logging with both text and JSON output formats
 - Error handling for corrupted or unreadable video files
 - Docker-ready with environment variable support
@@ -53,6 +53,7 @@ docker run --rm -e RESOLUTION=1920x1080 -e COMPARISON=eq -v /path/to/videos:/src
 | `COMPARISON` | Comparison operator for resolution matching     | `eq`          | `eq`, `lte`, `gte` |
 | `SRC_DIR`    | Source directory containing video files         | `/src`        | Any valid directory path |
 | `LOG_DIR`    | Directory for output logs                       | `/log`        | Any valid directory path |
+| `MAX_WORKERS` | Number of parallel worker processes for scanning | auto-detect (max 8) | Any positive integer |
 
 ## Resolution Formats
 The script supports multiple resolution format inputs:
@@ -90,7 +91,7 @@ The script generates timestamped output files in the log directory:
 For direct script execution (outside Docker):
 
 ```sh
-python video_detector.py --resolution 720p --comparison lte --src-dir /path/to/videos --log-dir /path/to/logs
+python video_detector.py --resolution 720p --comparison lte --src-dir /path/to/videos --log-dir /path/to/logs --max-workers 4
 ```
 
 ### Available Flags
@@ -100,6 +101,7 @@ python video_detector.py --resolution 720p --comparison lte --src-dir /path/to/v
 | `--comparison` | `-c`  | Comparison type (eq/lte/gte)             | `eq`    |
 | `--src-dir`    | `-s`  | Source directory to scan                  | `/src`  |
 | `--log-dir`    | `-l`  | Log output directory                      | `/log`  |
+| `--max-workers`| `-w`  | Number of parallel worker processes       | auto-detect (max 8) |
 
 ## Requirements
 - Docker
@@ -140,10 +142,16 @@ services:
       - COMPARISON=lte
       - SRC_DIR=/src
       - LOG_DIR=/log
+      - MAX_WORKERS=4  # Set number of parallel workers for resource control
     volumes:
       - ./videos:/src
       - ./scan_results:/log
 ```
+
+## Notes on Parallel Processing and Resource Management
+- The script uses parallel worker processes to speed up scanning. By default, it auto-detects available CPU cores and caps at 8 workers for efficiency.
+- You can control the number of workers using the `MAX_WORKERS` environment variable or the `--max-workers` flag.
+- In Docker, adjust `MAX_WORKERS` to match your container's CPU limits for optimal performance and resource usage.
 
 ## Use Cases
 - **Media Library Management**: Identify videos that need transcoding
