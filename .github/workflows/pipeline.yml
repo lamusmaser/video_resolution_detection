@@ -17,7 +17,7 @@ jobs:
     primary_pipeline:
         uses: lamusmaser/principal_container_builder_pipeline/.github/workflows/primary_pipeline.yml@main
         with:
-            IMAGE_NAME: lamusmaser/video_resolution_detection
+            IMAGE_NAME: lamusmaser/video_resolution_detector
         secrets:
             DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
             DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
